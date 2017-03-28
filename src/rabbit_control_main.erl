@@ -23,6 +23,8 @@
          sync_queue/1, cancel_sync_queue/1, become/1,
          purge_queue/1]).
 
+-compile(export_all).
+
 -import(rabbit_misc, [rpc_call/4, rpc_call/5, rpc_call/7]).
 
 -define(EXTERNAL_CHECK_INTERVAL, 1000).
@@ -269,16 +271,21 @@ do_action(Command, Node, Args, Opts, Inform, Timeout) ->
             action(Command, Node, Args, Opts, Inform)
     end.
 
-action(stop, Node, Args, _Opts, Inform) ->
+action(stop, Node, [], _Opts, Inform) ->
     Inform("Stopping and halting node ~p", [Node]),
+    call(Node, {rabbit, stop_and_halt, []});
+action(stop, Node, [PidFile], _Opts, Inform) ->
+    Inform("Stopping and halting node ~p with a pid file ~p", [Node, PidFile]),
+    Pid = read_pid_file(PidFile, false),
+    validate_pid_file_process(Pid),
     Res = call(Node, {rabbit, stop_and_halt, []}),
-    case {Res, Args} of
-        {ok, [PidFile]} -> wait_for_process_death(
-                             read_pid_file(PidFile, false));
-        {ok, [_, _| _]} -> exit({badarg, Args});
-        _               -> ok
+    case Res of
+        ok -> wait_for_process_death(Pid);
+        _  -> ok
     end,
     Res;
+action(stop, _Node, Args, _Opts, _Inform) ->
+    exit({badarg, Args});
 
 action(stop_app, Node, [], _Opts, Inform) ->
     Inform("Stopping rabbit application on node ~p", [Node]),
@@ -290,14 +297,14 @@ action(start_app, Node, [], _Opts, Inform) ->
 
 action(reset, Node, [], _Opts, Inform) ->
     Inform("Resetting node ~p", [Node]),
-    require_mnesia_stopped(Node, 
+    require_mnesia_stopped(Node,
                            fun() ->
                                    call(Node, {rabbit_mnesia, reset, []})
                            end);
 
 action(force_reset, Node, [], _Opts, Inform) ->
     Inform("Forcefully resetting node ~p", [Node]),
-    require_mnesia_stopped(Node, 
+    require_mnesia_stopped(Node,
                            fun() ->
                                    call(Node, {rabbit_mnesia, force_reset, []})
                            end);
@@ -309,21 +316,21 @@ action(join_cluster, Node, [ClusterNodeS], Opts, Inform) ->
                    false -> disc
                end,
     Inform("Clustering node ~p with ~p", [Node, ClusterNode]),
-    require_mnesia_stopped(Node, 
+    require_mnesia_stopped(Node,
                            fun() ->
                                    rpc_call(Node, rabbit_mnesia, join_cluster, [ClusterNode, NodeType])
                            end);
 
 action(change_cluster_node_type, Node, ["ram"], _Opts, Inform) ->
     Inform("Turning ~p into a ram node", [Node]),
-    require_mnesia_stopped(Node, 
+    require_mnesia_stopped(Node,
                            fun() ->
                                    rpc_call(Node, rabbit_mnesia, change_cluster_node_type, [ram])
                            end);
 action(change_cluster_node_type, Node, [Type], _Opts, Inform)
   when Type =:= "disc" orelse Type =:= "disk" ->
     Inform("Turning ~p into a disc node", [Node]),
-    require_mnesia_stopped(Node, 
+    require_mnesia_stopped(Node,
                            fun() ->
                                    rpc_call(Node, rabbit_mnesia, change_cluster_node_type, [disc])
                            end);
@@ -331,7 +338,7 @@ action(change_cluster_node_type, Node, [Type], _Opts, Inform)
 action(update_cluster_nodes, Node, [ClusterNodeS], _Opts, Inform) ->
     ClusterNode = list_to_atom(ClusterNodeS),
     Inform("Updating cluster nodes for ~p from ~p", [Node, ClusterNode]),
-    require_mnesia_stopped(Node, 
+    require_mnesia_stopped(Node,
                           fun() ->
                                   rpc_call(Node, rabbit_mnesia, update_cluster_nodes, [ClusterNode])
                           end);
@@ -496,9 +503,9 @@ action(set_disk_free_limit, Node, ["mem_relative", Arg], _Opts, Inform) ->
                              _ -> Arg
                          end),
     Inform("Setting disk free limit on ~p to ~p of total RAM", [Node, Frac]),
-    rpc_call(Node, 
-             rabbit_disk_monitor, 
-             set_disk_free_limit, 
+    rpc_call(Node,
+             rabbit_disk_monitor,
+             set_disk_free_limit,
              [{mem_relative, Frac}]);
 
 
@@ -802,6 +809,12 @@ read_pid_file(PidFile, Wait) ->
             exit({error, {could_not_read_pid, E}})
     end.
 
+validate_pid_file_process(Pid) ->
+    case rabbit_misc:is_os_process_alive(Pid) of
+        true  -> ok;
+        false -> exit({error, {pid_is_not_running, Pid}})
+    end.
+
 become(BecomeNode) ->
     error_logger:tty(false),
     case net_adm:ping(BecomeNode) of
@@ -962,7 +975,7 @@ escape(Bin, IsEscaped)  when is_binary(Bin) ->
 escape(L, false) when is_list(L) ->
     escape_char(lists:reverse(L), []);
 escape(L, true) when is_list(L) ->
-    L. 
+    L.
 
 escape_char([$\\ | T], Acc) ->
     escape_char(T, [$\\, $\\ | Acc]);
